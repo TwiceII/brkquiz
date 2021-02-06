@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brk quiz</title>
+    <script type="text/javascript" src="/static/js/htmx.min.js"></script>
+  </head>
+  <body hx-boost="true">
+    <h1>Quiz started</h1>
+    <div>
+      <form method="post" action="/saveResults">
+        <input type="hidden" value="{{.PartakerId}}" name="partaker_id" />
+        <ul>
+          {{range .QuizItems}}
+          <li>
+            <input type="hidden" value="{{.Index}}" name="qi_index" />
+            <span>{{.Text}}</span>
+            <div>
+              {{$idx := .Index}}
+              {{range .Answers}}
+              <input type="radio"
+                     id="answer_{{.Key}}_for_{{$idx}}"
+                     name="answer_key_for_{{$idx}}"
+                     onchange="checkRadiosFor({{$idx}})"
+                     value="{{.Key}}"/>
+              <label for="answer_{{.Key}}_for_{{$idx}}">
+                <span>{{.Key}}</span>
+                <p>{{.Text}}</p>
+              </label>
+              {{end}}
+            </div>
+          </li>
+          {{end}}
+        </ul>
+        <button id="submit-button"
+                type="submit" disabled="disabled" onclick="stopTimer()">Сохранить</button>
+      </form>
+    </div>
+    <script type="text/javascript">
+     var timer;
+
+     function startTimer(expirationMs) {
+       console.log("starting timer");
+       const totalSecs = expirationMs / 1000;
+       console.log(totalSecs);
+       var passedSecs = 0;
+       // Update the count down every 1 second
+       timer = setInterval(function() {
+         passedSecs = passedSecs + 1;
+         if (passedSecs >= totalSecs) {
+           clearInterval(timer);
+         }
+         var minutes = Math.floor((totalSecs - passedSecs) / 60);
+         var seconds = totalSecs - (minutes * 60) - passedSecs;
+         console.log("minutes: " + minutes + ", secs: " + seconds);
+       }, 1000);
+     };
+
+     function stopTimer() {
+       console.log("stop timer");
+       clearInterval(timer);
+     };
+
+     var checkedIndexes = new Set();
+     
+     function checkRadiosFor(idx) {
+       console.log("checking radio for " + idx);
+       checkedIndexes.add(idx);
+       if (checkedIndexes.size == {{len .QuizItems}}) {
+         console.log("enough");
+         document.getElementById('submit-button').removeAttribute("disabled");
+       } else {
+         console.log("not enough");
+       }
+     };
+
+     startTimer({{.ExpirationTime}});
+    </script>
+  </body>
+</html>
