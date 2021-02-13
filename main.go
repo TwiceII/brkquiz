@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,39 +21,55 @@ import (
 const (
 	rBytes           = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	EXPIRATIION_TIME = 3600000
+	// EXPIRATIION_TIME = 3000
+)
+
+var (
+	ESessionNotFound = errors.New("partaker session wasn't found")
 )
 
 var (
 	db        *bolt.DB // global bolt db handler
 	allQItems []QuizItem
+	allWaves  []SessionWave
 )
 
 var (
 	BUCKET_QUIZ_ITEMS        = []byte("quiz_items")
 	BUCKET_PARTAKER_SESSIONS = []byte("partaker_sessions")
+	BUCKET_SESSION_WAVES     = []byte("session_waves")
 )
 
 // =============================================================================
 // Main data structs
 // =============================================================================
+// поток (может быть несколько в день)
+type SessionWave struct {
+	WaveId             string
+	RegStartTimestamp  time.Time
+	RegFinishTimestamp time.Time
+}
+
 type QuizAnswer struct {
-	Key  string
-	Text string
+	Index int
+	Text  string
 }
 
 type QuizItem struct {
-	Index          int
-	Text           string
-	Answers        []QuizAnswer
-	RightAnswerKey string
+	Index            int
+	Text             string
+	WaveId           string
+	Answers          []QuizAnswer
+	RightAnswerIndex int
 }
 
 type PartakerAnswer struct {
 	QuizItemIndex int
-	AnswerKey     string
+	AnswerIndex   int
 }
 
 type PartakerSession struct {
+	WaveId          string
 	PartakerId      string
 	PartakerName    string
 	PartakerPhone   string
@@ -66,26 +83,66 @@ type PartakerSession struct {
 // sample data
 var QuizItems = []QuizItem{
 	QuizItem{
-		Index: 0,
-		Text:  "Some question 1",
+		Index:  0,
+		WaveId: "first",
+		Text:   "Some question 1",
 		Answers: []QuizAnswer{
-			QuizAnswer{"A", "Answer 1 A"},
-			QuizAnswer{"B", "Answer 1 B"},
-			QuizAnswer{"C", "Answer 1 C"},
-			QuizAnswer{"D", "Answer 1 D"},
+			QuizAnswer{1, "Answer 1 1"},
+			QuizAnswer{2, "Answer 1 2"},
+			QuizAnswer{3, "Answer 1 3"},
+			QuizAnswer{4, "Answer 1 4"},
 		},
-		RightAnswerKey: "A",
+		RightAnswerIndex: 1,
 	},
 	QuizItem{
-		Index: 1,
-		Text:  "Some question 2",
+		Index:  1,
+		WaveId: "second",
+		Text:   "Some question 2",
 		Answers: []QuizAnswer{
-			QuizAnswer{"A", "Answer 2 A"},
-			QuizAnswer{"B", "Answer 2 B"},
-			QuizAnswer{"C", "Answer 2 C"},
-			QuizAnswer{"D", "Answer 2 D"},
+			QuizAnswer{1, "Answer 2 1"},
+			QuizAnswer{2, "Answer 2 2"},
+			QuizAnswer{3, "Answer 2 3"},
+			QuizAnswer{4, "Answer 2 4"},
 		},
-		RightAnswerKey: "B",
+		RightAnswerIndex: 2,
+	},
+	QuizItem{
+		Index:  3,
+		WaveId: "second",
+		Text:   "Some question 3",
+		Answers: []QuizAnswer{
+			QuizAnswer{1, "Answer 3 1"},
+			QuizAnswer{2, "Answer 3 2"},
+			QuizAnswer{3, "Answer 3 3"},
+			QuizAnswer{4, "Answer 3 4"},
+		},
+		RightAnswerIndex: 4,
+	},
+	QuizItem{
+		Index:  4,
+		WaveId: "second",
+		Text:   "Some question 4",
+		Answers: []QuizAnswer{
+			QuizAnswer{1, "Answer 4 1"},
+			QuizAnswer{2, "Answer 4 2"},
+			QuizAnswer{3, "Answer 4 3"},
+			QuizAnswer{4, "Answer 4 4"},
+		},
+		RightAnswerIndex: 3,
+	},
+}
+
+var almatyTZ, _ = time.LoadLocation("Asia/Almaty")
+var Waves = []SessionWave{
+	SessionWave{
+		WaveId:             "first",
+		RegStartTimestamp:  time.Date(2021, 2, 13, 10, 0, 0, 0, almatyTZ),
+		RegFinishTimestamp: time.Date(2021, 2, 13, 10, 15, 0, 0, almatyTZ),
+	},
+	SessionWave{
+		WaveId:             "second",
+		RegStartTimestamp:  time.Date(2021, 2, 13, 15, 0, 0, 0, almatyTZ),
+		RegFinishTimestamp: time.Date(2021, 2, 13, 19, 15, 0, 0, almatyTZ),
 	},
 }
 
@@ -108,6 +165,18 @@ func newPartakerId() string {
 
 func GetInitQuizItems() []QuizItem {
 	return QuizItems
+}
+
+func ShuffleQuizItemsWithAnswers(qis []QuizItem) {
+	// shuffle quiz items
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(qis), func(i, j int) { qis[i], qis[j] = qis[j], qis[i] })
+	// shuffle answers in each quiz item
+	for idx, qi := range qis {
+		rand.Shuffle(len(qi.Answers), func(i, j int) {
+			qis[idx].Answers[i], qis[idx].Answers[j] = qis[idx].Answers[j], qis[idx].Answers[i]
+		})
+	}
 }
 
 // =============================================================================
@@ -166,6 +235,22 @@ func resetDB() error {
 			return fmt.Errorf("create bucket: %s", err)
 		}
 
+		bw, err := tx.CreateBucketIfNotExists(BUCKET_SESSION_WAVES)
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+
+		for _, sw := range Waves {
+			bs, err := encodeToBytes(sw)
+			if err != nil {
+				return fmt.Errorf("failed to encode to bytes: %s", err)
+			}
+			err = bw.Put([]byte(sw.WaveId), bs)
+			if err != nil {
+				return fmt.Errorf("failed to put into bytes: %s", err)
+			}
+		}
+
 		return nil
 	})
 }
@@ -193,11 +278,48 @@ func getDBQuizItems() ([]QuizItem, error) {
 	return qis, err
 }
 
+func getDBSessionWaves() ([]SessionWave, error) {
+	var waves []SessionWave
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BUCKET_SESSION_WAVES)
+		b.ForEach(func(k, v []byte) error {
+			var w SessionWave
+			err := decodeFromBytes(v, &w)
+			if err != nil {
+				return err
+			}
+			waves = append(waves, w)
+			return nil
+		})
+		return nil
+	})
+
+	return waves, err
+}
+
+func GetPartakerSessionById(pId string) (PartakerSession, error) {
+	var ps PartakerSession
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BUCKET_PARTAKER_SESSIONS)
+		v := b.Get([]byte(pId))
+		if v == nil {
+			return ESessionNotFound
+		}
+		err := decodeFromBytes(v, &ps)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	return ps, err
+}
+
 // createNewPartakerSession creates new partaker session in boltdb
 // and returns created partaker's id
-func createNewPartakerSession(pName, pPhone, pEmail string) (string, error) {
+func createNewPartakerSession(pName, pPhone, pEmail string, wv SessionWave) (string, error) {
 	pId := newPartakerId()
 	ps := PartakerSession{
+		WaveId:         wv.WaveId,
 		PartakerId:     pId,
 		PartakerName:   pName,
 		PartakerPhone:  pPhone,
@@ -257,7 +379,7 @@ func savePartakerSessionResult(pId string, pas []PartakerAnswer) (string, error)
 // Web handlers
 // =============================================================================
 var (
-	tIndex, tQuiz, tError, tFinish *template.Template
+	tIndex, tWavesList, tQuiz, tError, tFinish *template.Template
 )
 
 func initTemplates() {
@@ -265,10 +387,20 @@ func initTemplates() {
 	tQuiz = template.Must(template.New("quiz.html").ParseFiles("quiz.html"))
 	tError = template.Must(template.New("error.html").ParseFiles("error.html"))
 	tFinish = template.Must(template.New("finish.html").ParseFiles("finish.html"))
+	tWavesList = template.Must(template.New("waves.html").ParseFiles("waves.html"))
+}
+
+func RenderWavesList(w http.ResponseWriter) {
+	tWavesList.Execute(w, allWaves)
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	tIndex.Execute(w, nil)
+	curWave := GetCurrentSessionWave()
+	if curWave != nil {
+		tIndex.Execute(w, nil)
+	} else {
+		RenderWavesList(w)
+	}
 }
 
 func renderErrorTemplate(w http.ResponseWriter, err error) {
@@ -284,9 +416,28 @@ type QuizVM struct {
 	QuizItems      []QuizItem
 }
 
+func GetCurrentSessionWave() *SessionWave {
+	now := time.Now()
+	var foundWave *SessionWave
+	for _, wv := range allWaves {
+		if now.After(wv.RegStartTimestamp) && now.Before(wv.RegFinishTimestamp) {
+			foundWave = &wv
+			break
+		}
+	}
+	return foundWave
+}
+
 func startHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("handle start")
 
+	// check session wave
+	curWave := GetCurrentSessionWave()
+	if curWave == nil {
+		RenderWavesList(w)
+	}
+
+	// if at proper session wave
 	pName := strings.TrimSpace(r.FormValue("partaker_name"))
 	pPhone := strings.TrimSpace(r.FormValue("partaker_phone"))
 	pEmail := strings.TrimSpace(r.FormValue("partaker_email"))
@@ -294,7 +445,6 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("pName: " + pName)
 	fmt.Println("pPhone: " + pPhone)
 	if pName == "" || pPhone == "" {
-		// @@TODO: return error page
 		renderErrorTemplate(w, errors.New("Phone and name not passed"))
 		return
 	}
@@ -302,16 +452,27 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	// @@TODO: check if already exists same session ?
 
 	// create new session
-	pId, err := createNewPartakerSession(pName, pPhone, pEmail)
+	pId, err := createNewPartakerSession(pName, pPhone, pEmail, *curWave)
 	if err != nil {
 		renderErrorTemplate(w, errors.Wrap(err, "Failed to create new partaker session"))
 		return
 	}
 
+	// filter quiz items by wave and shuffle them
+	var qItems []QuizItem
+	for _, qi := range allQItems {
+		if qi.WaveId == curWave.WaveId {
+			qItems = append(qItems, qi)
+		}
+	}
+	ShuffleQuizItemsWithAnswers(qItems)
+	fmt.Println("Shuffled qItems")
+	fmt.Println(qItems)
+
 	qvm := QuizVM{
 		PartakerId:     pId,
 		ExpirationTime: EXPIRATIION_TIME,
-		QuizItems:      allQItems,
+		QuizItems:      qItems,
 	}
 
 	// return quiz html fragment with partaker id
@@ -327,7 +488,8 @@ type FinishVM struct {
 }
 
 func saveResultsHandler(w http.ResponseWriter, r *http.Request) {
-	// @@TODO: check if time hasn't expired
+	now := time.Now()
+
 	fmt.Println("save results")
 	err := r.ParseForm()
 	if err != nil {
@@ -341,18 +503,42 @@ func saveResultsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pSession, err := GetPartakerSessionById(pId)
+	if err != nil {
+		renderErrorTemplate(w, errors.New("Error while getting partaker session"))
+		return
+	}
+
+	// check if time hasn't expired
+	exp := pSession.StartTimestamp.Add(time.Millisecond*EXPIRATIION_TIME +
+		// additional minute for latency delays etc.
+		// time.Millisecond*1000)
+		time.Millisecond*60000)
+	if now.After(exp) {
+		renderErrorTemplate(w, errors.New("time has expired"))
+		return
+	}
+
 	// get answers from form
-	// (assumes that there must be as many partaker answers, as quiz items)
-	pas := make([]PartakerAnswer, len(allQItems))
-	for i, qi := range allQItems {
+	// there might be less answers than quiz items
+	var pas []PartakerAnswer
+
+	for _, qi := range allQItems {
 		ak := fmt.Sprintf("answer_key_for_%v", qi.Index)
 		val := r.PostFormValue(ak)
+		// if answer wasn't provided for this quiz item, keep on
 		if val == "" {
-			renderErrorTemplate(w, errors.New("answer value wasn't found for key "+ak))
+			continue
+		}
+		// else parse and add
+		iVal, err := strconv.Atoi(val)
+		if err != nil {
+			renderErrorTemplate(w, errors.New("failed to convert to int answer index "+val))
 			return
 		}
-		pas[i] = PartakerAnswer{QuizItemIndex: qi.Index, AnswerKey: val}
+		pas = append(pas, PartakerAnswer{QuizItemIndex: qi.Index, AnswerIndex: iVal})
 	}
+	fmt.Printf("got %v answers\n", len(pas))
 	pName, err := savePartakerSessionResult(pId, pas)
 	if err != nil {
 		renderErrorTemplate(w, errors.New("Failed to save partaker session"))
@@ -392,20 +578,30 @@ func main() {
 	db = newdb
 	defer db.Close()
 
-	err = resetDB()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("DONE: reset db")
+	// err = resetDB()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Println("DONE: reset db")
 
 	initGOBTypes()
 
-	// get all quiz items from db once and cache into global var
+	// get all quiz items and waves from db once and cache into global var
 	qis, err := getDBQuizItems()
 	if err != nil {
 		log.Fatal(err)
 	}
 	allQItems = qis
+	fmt.Println(allQItems)
+	wvs, err := getDBSessionWaves()
+	if err != nil {
+		log.Fatal(err)
+	}
+	allWaves = wvs
+	fmt.Println(allWaves)
+
+	ShuffleQuizItemsWithAnswers(allQItems)
+	fmt.Println(allQItems)
 
 	// init
 	initTemplates()

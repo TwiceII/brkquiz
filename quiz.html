@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Brk quiz</title>
+    <title>STARTED Brk quiz</title>
     <script type="text/javascript" src="/static/js/htmx.min.js"></script>
   </head>
-  <body hx-boost="true">
+  <body hx-boost="true" hx-target="body">
     <h1>Quiz started</h1>
     <div>
       <form method="post" action="/saveResults">
@@ -18,15 +18,25 @@
             <span>{{.Text}}</span>
             <div>
               {{$idx := .Index}}
-              {{range .Answers}}
+              {{range $i, $a := .Answers}}
               <input type="radio"
-                     id="answer_{{.Key}}_for_{{$idx}}"
+                     id="answer_{{$a.Index}}_for_{{$idx}}"
                      name="answer_key_for_{{$idx}}"
                      onchange="checkRadiosFor({{$idx}})"
-                     value="{{.Key}}"/>
-              <label for="answer_{{.Key}}_for_{{$idx}}">
-                <span>{{.Key}}</span>
-                <p>{{.Text}}</p>
+                     value="{{$a.Index}}"/>
+              <label for="answer_{{$a.Index}}_for_{{$idx}}">
+                <span>
+                  {{if (eq $i 0)}}
+                  A
+                  {{else if (eq $i 1)}}
+                  B
+                  {{else if (eq $i 2)}}
+                  C
+                  {{else}}
+                  D
+                  {{end}}
+                </span>
+                <p>{{$a.Text}}</p>
               </label>
               {{end}}
             </div>
@@ -40,7 +50,7 @@
     <script type="text/javascript">
      var timer;
 
-     function startTimer(expirationMs) {
+     window.startTimer = (expirationMs) => {
        console.log("starting timer");
        const totalSecs = expirationMs / 1000;
        console.log(totalSecs);
@@ -57,14 +67,14 @@
        }, 1000);
      };
 
-     function stopTimer() {
+     window.stopTimer = () => {
        console.log("stop timer");
        clearInterval(timer);
      };
 
      var checkedIndexes = new Set();
      
-     function checkRadiosFor(idx) {
+     window.checkRadiosFor = (idx) => {
        console.log("checking radio for " + idx);
        checkedIndexes.add(idx);
        if (checkedIndexes.size == {{len .QuizItems}}) {
@@ -75,7 +85,9 @@
        }
      };
 
-     startTimer({{.ExpirationTime}});
+     (function() {
+       window.startTimer({{.ExpirationTime}});
+     })();
     </script>
   </body>
 </html>
