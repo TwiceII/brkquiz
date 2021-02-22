@@ -38,6 +38,7 @@ var (
 	BUCKET_QUIZ_ITEMS        = []byte("quiz_items")
 	BUCKET_PARTAKER_SESSIONS = []byte("partaker_sessions")
 	BUCKET_SESSION_WAVES     = []byte("session_waves")
+	BUCKET_SUBSCRIPTIONS     = []byte("subscriptions")
 )
 
 // =============================================================================
@@ -78,6 +79,12 @@ type PartakerSession struct {
 	FinishTimestamp time.Time
 	Answers         []PartakerAnswer
 	Score           int
+}
+
+type Subscription struct {
+	Email         string
+	Phone         string
+	SubsTimestamp time.Time
 }
 
 // sample data
@@ -163,6 +170,10 @@ func newPartakerId() string {
 	return newRStr(6)
 }
 
+func newSubscriptionId() string {
+	return newRStr(6)
+}
+
 func GetInitQuizItems() []QuizItem {
 	return QuizItems
 }
@@ -228,6 +239,11 @@ func resetDB() error {
 			if err != nil {
 				return fmt.Errorf("failed to put into bytes: %s", err)
 			}
+		}
+
+		_, err = tx.CreateBucketIfNotExists(BUCKET_SUBSCRIPTIONS)
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
 		}
 
 		_, err = tx.CreateBucketIfNotExists(BUCKET_PARTAKER_SESSIONS)
@@ -314,6 +330,28 @@ func GetPartakerSessionById(pId string) (PartakerSession, error) {
 	return ps, err
 }
 
+func createSubscription(email, phone string) error {
+	id := newSubscriptionId()
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(BUCKET_SUBSCRIPTIONS)
+		bs, err := encodeToBytes(&Subscription{
+			Id:            id,
+			Email:         email,
+			Phone:         phone,
+			SubsTimestamp: time.Now(),
+		})
+		if err != nil {
+			return err
+		}
+		err = b.Put([]byte(id), bs)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	return err
+}
+
 // createNewPartakerSession creates new partaker session in boltdb
 // and returns created partaker's id
 func createNewPartakerSession(pName, pPhone, pEmail string, wv SessionWave) (string, error) {
@@ -379,11 +417,13 @@ func savePartakerSessionResult(pId string, pas []PartakerAnswer) (string, error)
 // Web handlers
 // =============================================================================
 var (
-	tIndex, tWavesList, tQuiz, tError, tFinish *template.Template
+	tIndex, tPromo, tSubSuccess, tWavesList, tQuiz, tError, tFinish *template.Template
 )
 
 func initTemplates() {
 	tIndex = template.Must(template.New("index.html").ParseFiles("index.html"))
+	tPromo = template.Must(template.New("promo.html").ParseFiles("promo.html"))
+	tSubSuccess = template.Must(template.New("sub-success.html").ParseFiles("sub-success.html"))
 	tQuiz = template.Must(template.New("quiz.html").ParseFiles("quiz.html"))
 	tError = template.Must(template.New("error.html").ParseFiles("error.html"))
 	tFinish = template.Must(template.New("finish.html").ParseFiles("finish.html"))
@@ -401,6 +441,10 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		RenderWavesList(w)
 	}
+}
+
+func promoHandler(w http.ResponseWriter, r *http.Request) {
+	tPromo.Execute(w, nil)
 }
 
 func renderErrorTemplate(w http.ResponseWriter, err error) {
@@ -487,6 +531,32 @@ type FinishVM struct {
 	PartakerName string
 }
 
+func subscribeHandler(w http.ResponseWriter, r *http.Request) {
+	err := r.ParseForm()
+	if err != nil {
+		renderSubErrorTemplate(w, errors.New("failed to parse"))
+		return
+	}
+
+	email := r.PostFormValue("email")
+	if email == "" {
+		renderSubErrorTemplate(w, errors.New("Email wasn't found"))
+		return
+	}
+
+	err = createSubscription(email, phone)
+	if err != nil {
+		renderSubErrorTemplate(w, errors.New("Failed to create subscription"))
+		return
+	}
+
+	err = tSubSuccess.Execute(w, nil)
+	if err != nil {
+		renderSubErrorTemplate(w, errors.New("Failed to execute template"))
+		return
+	}
+}
+
 func saveResultsHandler(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 
@@ -559,6 +629,7 @@ type myfs struct {
 
 func initRoutes() {
 	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/promo", promoHandler)
 	http.HandleFunc("/start", startHandler)
 	http.HandleFunc("/saveResults", saveResultsHandler)
 	fs := http.FileServer(myfs{http.Dir("./public/")})
